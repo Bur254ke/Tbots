@@ -5,7 +5,11 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
-// ═══ BOT CONFIGS (can be changed via API) ═══
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "Mbuki@2030.";
+const MAIN_BOT_URL = process.env.MAIN_BOT_URL || "https://video-app-bot-production.up.railway.app";
+const MAIN_BOT_SECRET = process.env.MAIN_BOT_SECRET || "xK9mP2qL7vR4nJ8w";
+const MAIN_BOT_ADMIN = process.env.MAIN_BOT_ADMIN || "Mbuki@2030.";
+
 const bots = {
   bot1: {
     name: "Femboys → Haul",
@@ -16,6 +20,7 @@ const bots = {
     interval: 20,
     lastForwarded: null,
     status: "idle",
+    forwardCount: 0,
   },
   bot2: {
     name: "HaulTransparent → Haul2",
@@ -26,10 +31,10 @@ const bots = {
     interval: 20,
     lastForwarded: null,
     status: "idle",
+    forwardCount: 0,
   },
 };
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "Mbuki@2030.";
 const timers = {};
 const forwarded1 = new Set();
 const forwarded2 = new Set();
@@ -101,29 +106,25 @@ async function runBot(botKey) {
   const bot = bots[botKey];
   if (!bot.active) return;
   const forwardedSet = botKey === "bot1" ? forwarded1 : forwarded2;
-
   bot.status = "running";
   console.log(`\n🤖 ${bot.name} — looking for videos...`);
-
   const latestId = await getLatestMessageId(bot.token, bot.sourceId);
   const videos = await findVideos(bot.token, bot.sourceId, latestId);
-
   if (videos.length === 0) {
     bot.status = "idle";
     console.log(`⚠️ ${bot.name} — no videos found`);
     return;
   }
-
   const unforwarded = videos.filter(v => !forwardedSet.has(v.messageId));
   const pool = unforwarded.length > 0 ? unforwarded : videos;
   const pick = pool[Math.floor(Math.random() * pool.length)];
-
   const ok = await copyMessage(bot.token, bot.sourceId, bot.destId, pick.messageId);
   if (ok) {
     forwardedSet.add(pick.messageId);
     bot.lastForwarded = new Date().toISOString();
     bot.status = "idle";
-    console.log(`✅ ${bot.name} — forwarded!`);
+    bot.forwardCount++;
+    console.log(`✅ ${bot.name} — forwarded! Total: ${bot.forwardCount}`);
   } else {
     bot.status = "error";
   }
@@ -133,21 +134,15 @@ function startTimer(botKey) {
   if (timers[botKey]) clearInterval(timers[botKey]);
   runBot(botKey);
   timers[botKey] = setInterval(() => runBot(botKey), bots[botKey].interval * 60 * 1000);
-  console.log(`⏰ ${bots[botKey].name} — running every ${bots[botKey].interval} mins`);
 }
 
 function stopTimer(botKey) {
-  if (timers[botKey]) {
-    clearInterval(timers[botKey]);
-    delete timers[botKey];
-  }
+  if (timers[botKey]) { clearInterval(timers[botKey]); delete timers[botKey]; }
   bots[botKey].active = false;
   bots[botKey].status = "stopped";
 }
 
-// ═══ ADMIN API ═══
-
-// Get all bots status
+// ═══ FORWARDING BOTS API ═══
 app.get("/admin/bots", adminAuth, (req, res) => {
   const status = {};
   Object.keys(bots).forEach(key => {
@@ -159,12 +154,12 @@ app.get("/admin/bots", adminAuth, (req, res) => {
       sourceId: bots[key].sourceId,
       destId: bots[key].destId,
       lastForwarded: bots[key].lastForwarded,
+      forwardCount: bots[key].forwardCount,
     };
   });
   res.json(status);
 });
 
-// Start a bot
 app.post("/admin/bots/:key/start", adminAuth, (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
@@ -173,7 +168,6 @@ app.post("/admin/bots/:key/start", adminAuth, (req, res) => {
   res.json({ success: true, message: `${bots[key].name} started` });
 });
 
-// Stop a bot
 app.post("/admin/bots/:key/stop", adminAuth, (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
@@ -181,7 +175,6 @@ app.post("/admin/bots/:key/stop", adminAuth, (req, res) => {
   res.json({ success: true, message: `${bots[key].name} stopped` });
 });
 
-// Update bot config (change channels, interval)
 app.post("/admin/bots/:key/config", adminAuth, (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
@@ -194,7 +187,6 @@ app.post("/admin/bots/:key/config", adminAuth, (req, res) => {
   res.json({ success: true, config: bots[key] });
 });
 
-// Force forward now
 app.post("/admin/bots/:key/forward", adminAuth, async (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
@@ -202,11 +194,61 @@ app.post("/admin/bots/:key/forward", adminAuth, async (req, res) => {
   res.json({ success: true, message: "Forwarded!" });
 });
 
-app.get("/", (req, res) => res.json({ status: "ok", message: "Forwarding bots running 🚀" }));
+// ═══ MAIN BOT PROXY API ═══
+app.get("/admin/mainbot/stats", adminAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${MAIN_BOT_URL}/admin/stats`, {
+      headers: { "x-admin-token": MAIN_BOT_ADMIN }
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/admin/mainbot/announcement", adminAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${MAIN_BOT_URL}/admin/announcement`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-token": MAIN_BOT_ADMIN },
+      body: JSON.stringify(req.body),
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/admin/mainbot/ads/toggle", adminAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${MAIN_BOT_URL}/admin/ads/toggle`, {
+      method: "POST",
+      headers: { "x-admin-token": MAIN_BOT_ADMIN },
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/admin/mainbot/videos/:id", adminAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${MAIN_BOT_URL}/admin/videos/${req.params.id}`, {
+      method: "DELETE",
+      headers: { "x-admin-token": MAIN_BOT_ADMIN },
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/admin/mainbot/settings", adminAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${MAIN_BOT_URL}/admin/settings`, {
+      headers: { "x-admin-token": MAIN_BOT_ADMIN }
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/", (req, res) => res.json({ status: "ok", message: "All bots running 🚀" }));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Forwarding bots + Admin API on port ${PORT}`);
+  console.log(`🚀 All bots + Admin API on port ${PORT}`);
   startTimer("bot1");
   startTimer("bot2");
 });
