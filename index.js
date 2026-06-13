@@ -173,6 +173,7 @@ async function runBot(botKey) {
   const ok = await copyMessage(bot.token, bot.sourceId, bot.destId, pick.messageId);
   if (ok) {
     forwardedSet.add(pick.messageId);
+    saveForwardedId(botKey, pick.messageId);
     bot.lastForwarded = new Date().toISOString();
     bot.status = "idle";
     bot.forwardCount++;
@@ -299,8 +300,10 @@ app.get("/admin/mainbot/settings", adminAuth, async (req, res) => {
 app.get("/", (req, res) => res.json({ status: "ok", message: "All bots running 🚀" }));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 All bots + Admin API on port ${PORT}`);
+  await loadForwardedIds();
   startTimer("bot1");
   startTimer("bot2");
+});
 });
