@@ -1,6 +1,38 @@
 require("dotenv").config();
 const fetch = require("node-fetch");
 const express = require("express");
+const { createClient } = require("@supabase/supabase-js");
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY
+);
+
+const forwarded1 = new Set();
+const forwarded2 = new Set();
+
+// Load previously forwarded IDs from Supabase on startup
+async function loadForwardedIds() {
+  try {
+    const { data } = await supabase.from("forwarded_ids").select("message_id, bot_key");
+    if (data) {
+      data.forEach(row => {
+        if (row.bot_key === "bot1") forwarded1.add(row.message_id);
+        if (row.bot_key === "bot2") forwarded2.add(row.message_id);
+      });
+      console.log(`📋 Loaded ${data.length} previously forwarded IDs`);
+    }
+  } catch (e) { console.error("Load error:", e.message); }
+}
+
+async function saveForwardedId(botKey, messageId) {
+  try {
+    await supabase.from("forwarded_ids").upsert(
+      { message_id: String(messageId), bot_key: botKey },
+      { onConflict: "message_id,bot_key" }
+    );
+  } catch (e) {}
+}
 
 const app = express();
 app.use(express.json());
@@ -36,8 +68,28 @@ const bots = {
 };
 
 const timers = {};
-const forwarded1 = new Set();
-const forwarded2 = new Set();
+const FORWARDED_FILE = "./forwarded.json";
+let forwardedData = { bot1: [], bot2: [] };
+
+// Load forwarded IDs from file
+try {
+  const data = require(FORWARDED_FILE);
+  forwardedData = data;
+} catch (e) {
+  forwardedData = { bot1: [], bot2: [] };
+}
+
+const forwarded1 = new Set(forwardedData.bot1);
+const forwarded2 = new Set(forwardedData.bot2);
+
+// Save forwarded IDs to file
+function saveForwarded() {
+  const fs = require("fs");
+  fs.writeFileSync(FORWARDED_FILE, JSON.stringify({
+    bot1: [...forwarded1],
+    bot2: [...forwarded2],
+  }));
+}
 
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
