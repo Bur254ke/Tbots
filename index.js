@@ -1,12 +1,6 @@
 require("dotenv").config();
 const fetch = require("node-fetch");
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SECRET_KEY
-);
 
 const app = express();
 app.use(express.json());
@@ -14,6 +8,10 @@ app.use(express.json());
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "Mbuki@2030.";
 const MAIN_BOT_URL = process.env.MAIN_BOT_URL || "https://video-app-bot-production.up.railway.app";
 const MAIN_BOT_ADMIN = process.env.MAIN_BOT_ADMIN || "Mbuki@2030.";
+
+// Simple in-memory tracking (Railway persists between requests, not restarts)
+const forwarded1 = new Set();
+const forwarded2 = new Set();
 
 const bots = {
   bot1: {
@@ -26,6 +24,8 @@ const bots = {
     lastForwarded: null,
     status: "idle",
     forwardCount: 0,
+    lastUpdateId: 0,
+    videoPool: [],
   },
   bot2: {
     name: "HaulTransparent → Haul2",
@@ -37,12 +37,12 @@ const bots = {
     lastForwarded: null,
     status: "idle",
     forwardCount: 0,
+    lastUpdateId: 0,
+    videoPool: [],
   },
 };
 
 const timers = {};
-const forwarded1 = new Set();
-const forwarded2 = new Set();
 
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
@@ -50,118 +50,97 @@ function adminAuth(req, res, next) {
   next();
 }
 
-async function loadForwardedIds() {
+async function tgApi(token, method, body = {}) {
   try {
-    const { data } = await supabase.from("forwarded_ids").select("message_id, bot_key");
-    if (data) {
-      data.forEach(row => {
-        if (row.bot_key === "bot1") forwarded1.add(row.message_id);
-        if (row.bot_key === "bot2") forwarded2.add(row.message_id);
-      });
-      console.log(`📋 Loaded ${data.length} previously forwarded IDs`);
-    }
-  } catch (e) { console.error("Load error:", e.message); }
-}
-
-async function saveForwardedId(botKey, messageId) {
-  try {
-    await supabase.from("forwarded_ids").upsert(
-      { message_id: String(messageId), bot_key: botKey },
-      { onConflict: "message_id,bot_key" }
-    );
-  } catch (e) {}
-}
-
-async function copyMessage(token, fromChatId, toChatId, messageId) {
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/copyMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: toChatId, from_chat_id: fromChatId, message_id: messageId }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
-    return data.ok;
-  } catch (e) { return false; }
-}
-
-async function getLatestMessageId(token, channelId) {
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: channelId, text: ".", disable_notification: true }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      const msgId = data.result.message_id;
-      await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: channelId, message_id: msgId }),
-      });
-      return msgId;
-    }
-  } catch (e) {}
-  return 100;
-}
-
-async function findVideos(token, channelId, startId) {
-  const videos = [];
-  for (let id = startId; id > Math.max(startId - 200, 1); id--) {
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/forwardMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: channelId, from_chat_id: channelId, message_id: id, disable_notification: true }),
-      });
-      const data = await res.json();
-      if (data.ok && data.result.video) {
-        videos.push({ messageId: id, caption: data.result.caption || "" });
-        await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: channelId, message_id: data.result.message_id }),
-        });
-      }
-      if (videos.length >= 50) break;
-    } catch (e) { continue; }
+    if (!data.ok) console.log(`❌ ${method} failed: ${data.description}`);
+    return data;
+  } catch (e) {
+    console.log(`❌ ${method} error: ${e.message}`);
+    return { ok: false };
   }
-  return videos;
 }
 
-async function runBot(botKey) {
+// Collect videos from channel updates
+async function collectVideos(bot) {
+  console.log(`📥 ${bot.name} — collecting videos from updates...`);
+  const data = await tgApi(bot.token, "getUpdates", {
+    offset: bot.lastUpdateId + 1,
+    limit: 100,
+    allowed_updates: ["channel_post"],
+  });
+
+  if (!data.ok || !data.result?.length) {
+    console.log(`📭 ${bot.name} — no new updates`);
+    return;
+  }
+
+  let newVideos = 0;
+  for (const update of data.result) {
+    bot.lastUpdateId = Math.max(bot.lastUpdateId, update.update_id);
+    const post = update.channel_post;
+    if (!post) continue;
+    if (String(post.chat.id) !== String(bot.sourceId)) continue;
+    if (!post.video) continue;
+    const msgId = post.message_id;
+    if (!bot.videoPool.find(v => v.messageId === msgId)) {
+      bot.videoPool.push({ messageId: msgId, caption: post.caption || "" });
+      newVideos++;
+    }
+  }
+  console.log(`✅ ${bot.name} — collected ${newVideos} new videos. Pool: ${bot.videoPool.length}`);
+}
+
+async function forwardVideo(botKey) {
   const bot = bots[botKey];
   if (!bot.active) return;
   const forwardedSet = botKey === "bot1" ? forwarded1 : forwarded2;
+
   bot.status = "running";
-  console.log(`\n🤖 ${bot.name} — looking for videos...`);
-  const latestId = await getLatestMessageId(bot.token, bot.sourceId);
-  const videos = await findVideos(bot.token, bot.sourceId, latestId);
-  if (videos.length === 0) {
+
+  // First collect any new videos
+  await collectVideos(bot);
+
+  if (bot.videoPool.length === 0) {
     bot.status = "idle";
-    console.log(`⚠️ ${bot.name} — no videos found`);
+    console.log(`⚠️ ${bot.name} — video pool empty`);
     return;
   }
-  const unforwarded = videos.filter(v => !forwardedSet.has(String(v.messageId)));
-  const pool = unforwarded.length > 0 ? unforwarded : videos;
+
+  // Pick unforwarded video
+  const unforwarded = bot.videoPool.filter(v => !forwardedSet.has(String(v.messageId)));
+  const pool = unforwarded.length > 0 ? unforwarded : bot.videoPool;
   const pick = pool[Math.floor(Math.random() * pool.length)];
-  const ok = await copyMessage(bot.token, bot.sourceId, bot.destId, pick.messageId);
-  if (ok) {
+
+  console.log(`📤 ${bot.name} — copying message ${pick.messageId}`);
+  const result = await tgApi(bot.token, "copyMessage", {
+    chat_id: bot.destId,
+    from_chat_id: bot.sourceId,
+    message_id: pick.messageId,
+  });
+
+  if (result.ok) {
     forwardedSet.add(String(pick.messageId));
-    saveForwardedId(botKey, pick.messageId);
     bot.lastForwarded = new Date().toISOString();
     bot.status = "idle";
     bot.forwardCount++;
     console.log(`✅ ${bot.name} — forwarded! Total: ${bot.forwardCount}`);
   } else {
     bot.status = "error";
+    console.log(`❌ ${bot.name} — copy failed: ${result.description}`);
   }
 }
 
 function startTimer(botKey) {
   if (timers[botKey]) clearInterval(timers[botKey]);
-  runBot(botKey);
-  timers[botKey] = setInterval(() => runBot(botKey), bots[botKey].interval * 60 * 1000);
+  forwardVideo(botKey);
+  timers[botKey] = setInterval(() => forwardVideo(botKey), bots[botKey].interval * 60 * 1000);
+  console.log(`⏰ ${bots[botKey].name} — every ${bots[botKey].interval} mins`);
 }
 
 function stopTimer(botKey) {
@@ -183,6 +162,7 @@ app.get("/admin/bots", adminAuth, (req, res) => {
       destId: bots[key].destId,
       lastForwarded: bots[key].lastForwarded,
       forwardCount: bots[key].forwardCount,
+      poolSize: bots[key].videoPool.length,
     };
   });
   res.json(status);
@@ -212,14 +192,21 @@ app.post("/admin/bots/:key/config", adminAuth, (req, res) => {
   if (interval) bots[key].interval = parseInt(interval);
   if (token) bots[key].token = token;
   if (bots[key].active) startTimer(key);
-  res.json({ success: true, config: bots[key] });
+  res.json({ success: true });
 });
 
 app.post("/admin/bots/:key/forward", adminAuth, async (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
-  await runBot(key);
+  await forwardVideo(key);
   res.json({ success: true, message: "Forwarded!" });
+});
+
+app.post("/admin/bots/:key/collect", adminAuth, async (req, res) => {
+  const { key } = req.params;
+  if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
+  await collectVideos(bots[key]);
+  res.json({ success: true, poolSize: bots[key].videoPool.length });
 });
 
 app.get("/admin/mainbot/stats", adminAuth, async (req, res) => {
@@ -229,50 +216,25 @@ app.get("/admin/mainbot/stats", adminAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/admin/mainbot/announcement", adminAuth, async (req, res) => {
-  try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/announcement`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-admin-token": MAIN_BOT_ADMIN },
-      body: JSON.stringify(req.body),
-    });
-    res.json(await r.json());
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 app.post("/admin/mainbot/ads/toggle", adminAuth, async (req, res) => {
   try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/ads/toggle`, {
-      method: "POST",
-      headers: { "x-admin-token": MAIN_BOT_ADMIN },
-    });
+    const r = await fetch(`${MAIN_BOT_URL}/admin/ads/toggle`, { method: "POST", headers: { "x-admin-token": MAIN_BOT_ADMIN } });
     res.json(await r.json());
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/admin/mainbot/videos/:id", adminAuth, async (req, res) => {
   try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/videos/${req.params.id}`, {
-      method: "DELETE",
-      headers: { "x-admin-token": MAIN_BOT_ADMIN },
-    });
+    const r = await fetch(`${MAIN_BOT_URL}/admin/videos/${req.params.id}`, { method: "DELETE", headers: { "x-admin-token": MAIN_BOT_ADMIN } });
     res.json(await r.json());
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/admin/mainbot/settings", adminAuth, async (req, res) => {
-  try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/settings`, { headers: { "x-admin-token": MAIN_BOT_ADMIN } });
-    res.json(await r.json());
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get("/", (req, res) => res.json({ status: "ok", message: "All bots running 🚀" }));
+app.get("/", (req, res) => res.json({ status: "ok", message: "Forwarding bots running 🚀" }));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-  console.log(`🚀 All bots + Admin API on port ${PORT}`);
-  await loadForwardedIds();
+app.listen(PORT, () => {
+  console.log(`🚀 Forwarding bots on port ${PORT}`);
   startTimer("bot1");
   startTimer("bot2");
 });
