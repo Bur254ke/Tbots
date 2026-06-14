@@ -8,38 +8,11 @@ const supabase = createClient(
   process.env.SUPABASE_SECRET_KEY
 );
 
-const forwarded1 = new Set();
-const forwarded2 = new Set();
-
-// Load previously forwarded IDs from Supabase on startup
-async function loadForwardedIds() {
-  try {
-    const { data } = await supabase.from("forwarded_ids").select("message_id, bot_key");
-    if (data) {
-      data.forEach(row => {
-        if (row.bot_key === "bot1") forwarded1.add(row.message_id);
-        if (row.bot_key === "bot2") forwarded2.add(row.message_id);
-      });
-      console.log(`📋 Loaded ${data.length} previously forwarded IDs`);
-    }
-  } catch (e) { console.error("Load error:", e.message); }
-}
-
-async function saveForwardedId(botKey, messageId) {
-  try {
-    await supabase.from("forwarded_ids").upsert(
-      { message_id: String(messageId), bot_key: botKey },
-      { onConflict: "message_id,bot_key" }
-    );
-  } catch (e) {}
-}
-
 const app = express();
 app.use(express.json());
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "Mbuki@2030.";
 const MAIN_BOT_URL = process.env.MAIN_BOT_URL || "https://video-app-bot-production.up.railway.app";
-const MAIN_BOT_SECRET = process.env.MAIN_BOT_SECRET || "xK9mP2qL7vR4nJ8w";
 const MAIN_BOT_ADMIN = process.env.MAIN_BOT_ADMIN || "Mbuki@2030.";
 
 const bots = {
@@ -68,11 +41,35 @@ const bots = {
 };
 
 const timers = {};
+const forwarded1 = new Set();
+const forwarded2 = new Set();
 
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
   if (token !== ADMIN_SECRET) return res.status(401).json({ error: "Unauthorized" });
   next();
+}
+
+async function loadForwardedIds() {
+  try {
+    const { data } = await supabase.from("forwarded_ids").select("message_id, bot_key");
+    if (data) {
+      data.forEach(row => {
+        if (row.bot_key === "bot1") forwarded1.add(row.message_id);
+        if (row.bot_key === "bot2") forwarded2.add(row.message_id);
+      });
+      console.log(`📋 Loaded ${data.length} previously forwarded IDs`);
+    }
+  } catch (e) { console.error("Load error:", e.message); }
+}
+
+async function saveForwardedId(botKey, messageId) {
+  try {
+    await supabase.from("forwarded_ids").upsert(
+      { message_id: String(messageId), bot_key: botKey },
+      { onConflict: "message_id,bot_key" }
+    );
+  } catch (e) {}
 }
 
 async function copyMessage(token, fromChatId, toChatId, messageId) {
@@ -145,12 +142,12 @@ async function runBot(botKey) {
     console.log(`⚠️ ${bot.name} — no videos found`);
     return;
   }
-  const unforwarded = videos.filter(v => !forwardedSet.has(v.messageId));
+  const unforwarded = videos.filter(v => !forwardedSet.has(String(v.messageId)));
   const pool = unforwarded.length > 0 ? unforwarded : videos;
   const pick = pool[Math.floor(Math.random() * pool.length)];
   const ok = await copyMessage(bot.token, bot.sourceId, bot.destId, pick.messageId);
   if (ok) {
-    forwardedSet.add(pick.messageId);
+    forwardedSet.add(String(pick.messageId));
     saveForwardedId(botKey, pick.messageId);
     bot.lastForwarded = new Date().toISOString();
     bot.status = "idle";
@@ -173,7 +170,7 @@ function stopTimer(botKey) {
   bots[botKey].status = "stopped";
 }
 
-// ═══ FORWARDING BOTS API ═══
+// ═══ ADMIN ROUTES ═══
 app.get("/admin/bots", adminAuth, (req, res) => {
   const status = {};
   Object.keys(bots).forEach(key => {
@@ -225,12 +222,9 @@ app.post("/admin/bots/:key/forward", adminAuth, async (req, res) => {
   res.json({ success: true, message: "Forwarded!" });
 });
 
-// ═══ MAIN BOT PROXY API ═══
 app.get("/admin/mainbot/stats", adminAuth, async (req, res) => {
   try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/stats`, {
-      headers: { "x-admin-token": MAIN_BOT_ADMIN }
-    });
+    const r = await fetch(`${MAIN_BOT_URL}/admin/stats`, { headers: { "x-admin-token": MAIN_BOT_ADMIN } });
     res.json(await r.json());
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -268,9 +262,7 @@ app.delete("/admin/mainbot/videos/:id", adminAuth, async (req, res) => {
 
 app.get("/admin/mainbot/settings", adminAuth, async (req, res) => {
   try {
-    const r = await fetch(`${MAIN_BOT_URL}/admin/settings`, {
-      headers: { "x-admin-token": MAIN_BOT_ADMIN }
-    });
+    const r = await fetch(`${MAIN_BOT_URL}/admin/settings`, { headers: { "x-admin-token": MAIN_BOT_ADMIN } });
     res.json(await r.json());
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -283,5 +275,4 @@ app.listen(PORT, async () => {
   await loadForwardedIds();
   startTimer("bot1");
   startTimer("bot2");
-});
 });
