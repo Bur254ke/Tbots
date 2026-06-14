@@ -68,28 +68,6 @@ const bots = {
 };
 
 const timers = {};
-const FORWARDED_FILE = "./forwarded.json";
-let forwardedData = { bot1: [], bot2: [] };
-
-// Load forwarded IDs from file
-try {
-  const data = require(FORWARDED_FILE);
-  forwardedData = data;
-} catch (e) {
-  forwardedData = { bot1: [], bot2: [] };
-}
-
-const forwarded1 = new Set(forwardedData.bot1);
-const forwarded2 = new Set(forwardedData.bot2);
-
-// Save forwarded IDs to file
-function saveForwarded() {
-  const fs = require("fs");
-  fs.writeFileSync(FORWARDED_FILE, JSON.stringify({
-    bot1: [...forwarded1],
-    bot2: [...forwarded2],
-  }));
-}
 
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
