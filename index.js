@@ -5,6 +5,9 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
+const { createClient } = require("@supabase/supabase-js");
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY);
+
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "Mbuki@2030.";
 const MAIN_BOT_URL = process.env.MAIN_BOT_URL || "https://video-app-bot-production.up.railway.app";
 const MAIN_BOT_ADMIN = process.env.MAIN_BOT_ADMIN || "Mbuki@2030.";
@@ -43,6 +46,37 @@ const bots = {
 };
 
 const timers = {};
+
+async function loadBotState() {
+  try {
+    const { data } = await supabase.from("bot_state").select("*");
+    if (data) {
+      data.forEach(row => {
+        if (bots[row.bot_key]) {
+          bots[row.bot_key].lastUpdateId = row.last_update_id || 0;
+        }
+        if (row.bot_key === "bot1" && row.forwarded_ids) {
+          row.forwarded_ids.forEach(id => forwarded1.add(String(id)));
+        }
+        if (row.bot_key === "bot2" && row.forwarded_ids) {
+          row.forwarded_ids.forEach(id => forwarded2.add(String(id)));
+        }
+      });
+      console.log("📋 Loaded bot state from Supabase");
+    }
+  } catch (e) { console.error("Load state error:", e.message); }
+}
+
+async function saveBotState(botKey) {
+  try {
+    const forwardedSet = botKey === "bot1" ? forwarded1 : forwarded2;
+    await supabase.from("bot_state").upsert({
+      bot_key: botKey,
+      last_update_id: bots[botKey].lastUpdateId,
+      forwarded_ids: [...forwardedSet],
+    }, { onConflict: "bot_key" });
+  } catch (e) { console.error("Save state error:", e.message); }
+}
 
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
