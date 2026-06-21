@@ -94,6 +94,8 @@ async function collectVideos(bot) {
     }
   }
   console.log(`✅ ${bot.name} — collected ${newVideos} new videos. Pool: ${bot.videoPool.length}`);
+  const botKey = bot === bots.bot1 ? "bot1" : "bot2";
+  await saveBotState(botKey);
 }
 
 async function forwardVideo(botKey) {
@@ -126,6 +128,7 @@ async function forwardVideo(botKey) {
 
   if (result.ok) {
     forwardedSet.add(String(pick.messageId));
+    await saveBotState(botKey);
     bot.lastForwarded = new Date().toISOString();
     bot.status = "idle";
     bot.forwardCount++;
@@ -233,8 +236,9 @@ app.delete("/admin/mainbot/videos/:id", adminAuth, async (req, res) => {
 app.get("/", (req, res) => res.json({ status: "ok", message: "Forwarding bots running 🚀" }));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Forwarding bots on port ${PORT}`);
+  await loadBotState();
   startTimer("bot1");
   startTimer("bot2");
 });
