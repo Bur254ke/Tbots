@@ -190,16 +190,27 @@ function stopTimer(botKey) {
 app.get("/admin/bots", adminAuth, (req, res) => {
   const status = {};
   Object.keys(bots).forEach(key => {
+    const bot = bots[key];
+    const minutesSinceLastForward = bot.lastForwarded
+      ? Math.round((Date.now() - new Date(bot.lastForwarded).getTime()) / 60000)
+      : null;
+    // Active but silent for 2x its own interval (or never forwarded at all) = likely stuck/broken.
+    const stale = bot.active && (
+      minutesSinceLastForward === null ? bot.forwardCount === 0 : minutesSinceLastForward > bot.interval * 2
+    );
     status[key] = {
-      name: bots[key].name,
-      active: bots[key].active,
-      status: bots[key].status,
-      interval: bots[key].interval,
-      sourceId: bots[key].sourceId,
-      destId: bots[key].destId,
-      lastForwarded: bots[key].lastForwarded,
-      forwardCount: bots[key].forwardCount,
-      poolSize: bots[key].videoPool.length,
+      name: bot.name,
+      active: bot.active,
+      status: bot.status,
+      interval: bot.interval,
+      sourceId: bot.sourceId,
+      destId: bot.destId,
+      lastForwarded: bot.lastForwarded,
+      forwardCount: bot.forwardCount,
+      poolSize: bot.videoPool.length,
+      minutesSinceLastForward,
+      stale,
+      poolExhausted: bot.videoPool.length === 0,
     };
   });
   res.json(status);
