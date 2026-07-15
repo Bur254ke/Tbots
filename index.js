@@ -148,10 +148,17 @@ async function forwardVideo(botKey) {
     return;
   }
 
-  // Pick unforwarded video
+  // Pick an unforwarded video. 2026-07-16: forward each source video EXACTLY
+  // ONCE — when the pool is fully forwarded, go idle instead of recycling old
+  // ones. The rewired channels feed maitwerking/maitrending only with NEW
+  // content; the old backlog (already forwarded) is never re-sent.
   const unforwarded = bot.videoPool.filter(v => !forwardedSet.has(String(v.messageId)));
-  const pool = unforwarded.length > 0 ? unforwarded : bot.videoPool;
-  const pick = pool[Math.floor(Math.random() * pool.length)];
+  if (unforwarded.length === 0) {
+    bot.status = "idle";
+    console.log(`✅ ${bot.name} — all ${bot.videoPool.length} pooled videos already forwarded; nothing new to send`);
+    return;
+  }
+  const pick = unforwarded[Math.floor(Math.random() * unforwarded.length)];
 
   console.log(`📤 ${bot.name} — copying message ${pick.messageId}`);
   const result = await tgApi(bot.token, "copyMessage", {
