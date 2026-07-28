@@ -78,6 +78,75 @@ async function saveBotState(botKey) {
   } catch (e) { console.error("Save state error:", e.message); }
 }
 
+
+// ─── Named forwarding destinations (2026-07-28) ───────────────────────────
+// The dashboard used to require a raw Telegram chat id to change where a bot
+// forwards. These are the same channels, addressable by name.
+//
+// A destination is a Telegram CHANNEL. Which community a video lands in is then
+// decided by the MAIN bot's communities.js, which maps channel id → community —
+// so a name here is only meaningful if that channel is present in that map. The
+// two below are the ones currently mapped:
+//   -1003870438959 → maitwerking
+//   -1003859771687 → maitrending
+//
+// To offer "Foxy: haul / trans / haul2" or "Mai: wetlooks" you need a Telegram
+// channel per community AND a matching line in the main bot's communities.js.
+// Those channels do not exist yet — the two haul channels were rewired to Mai on
+// 2026-07-16 — so add the ids to DESTINATIONS and to communities.js together.
+// Forwarding to a channel that is not in that map makes the main bot log
+// "Unknown channel" and silently drop every video.
+const DESTINATIONS = [
+  { key: "mai_maitwerking", site: "Mai", community: "maitwerking", label: "Mai: Mai Twerking", chatId: process.env.DEST1_ID || "-1003870438959" },
+  { key: "mai_maitrending", site: "Mai", community: "maitrending", label: "Mai: Trending", chatId: process.env.DEST2_ID || "-1003859771687" },
+  // Add when the channels exist (and are in communities.js):
+  // { key: "foxy_haul",  site: "Foxy", community: "haul",  label: "Foxy: Femboys",  chatId: "-100…" },
+  // { key: "foxy_trans", site: "Foxy", community: "trans", label: "Foxy: Trans",    chatId: "-100…" },
+  // { key: "foxy_haul2", site: "Foxy", community: "haul2", label: "Foxy: Trending", chatId: "-100…" },
+  // { key: "mai_wetlooks", site: "Mai", community: "wetlooks", label: "Mai: Wet Looks", chatId: "-100…" },
+];
+
+function destinationFor(chatId) {
+  return DESTINATIONS.find((d) => String(d.chatId) === String(chatId)) || null;
+}
+
+// ─── Config persistence ───────────────────────────────────────────────────
+// interval / destId / sourceId used to live only in the in-memory `bots` object,
+// so every change made from the dashboard was lost the next time Railway
+// restarted the service — the bot quietly reverted to its env defaults. Config is
+// now stored in `settings` (key/value, already used by the main backend) as
+// bot_config_<key> JSON, and re-applied on boot.
+const CONFIG_FIELDS = ["interval", "destId", "sourceId"];
+
+async function loadBotConfig() {
+  try {
+    const keys = Object.keys(bots).map((k) => "bot_config_" + k);
+    const { data } = await supabase.from("settings").select("key, value").in("key", keys);
+    (data || []).forEach((row) => {
+      const botKey = row.key.replace("bot_config_", "");
+      if (!bots[botKey]) return;
+      let cfg = {};
+      try { cfg = JSON.parse(row.value || "{}"); } catch (e) { return; }
+      CONFIG_FIELDS.forEach((f) => {
+        if (cfg[f] !== undefined && cfg[f] !== null && cfg[f] !== "") bots[botKey][f] = cfg[f];
+      });
+      if (cfg.interval) bots[botKey].interval = parseInt(cfg.interval, 10);
+    });
+    if (data && data.length) console.log("⚙️  Applied saved bot config");
+  } catch (e) { console.error("Load config error:", e.message); }
+}
+
+async function saveBotConfig(botKey) {
+  try {
+    const cfg = {};
+    CONFIG_FIELDS.forEach((f) => { cfg[f] = bots[botKey][f]; });
+    await supabase.from("settings").upsert(
+      { key: "bot_config_" + botKey, value: JSON.stringify(cfg), updated_at: new Date().toISOString() },
+      { onConflict: "key" }
+    );
+  } catch (e) { console.error("Save config error:", e.message); }
+}
+
 function adminAuth(req, res, next) {
   const token = req.headers["x-admin-token"];
   if (token !== ADMIN_SECRET) return res.status(401).json({ error: "Unauthorized" });
@@ -212,6 +281,7 @@ app.get("/admin/bots", adminAuth, (req, res) => {
       interval: bot.interval,
       sourceId: bot.sourceId,
       destId: bot.destId,
+      destination: destinationFor(bot.destId),
       lastForwarded: bot.lastForwarded,
       forwardCount: bot.forwardCount,
       poolSize: bot.videoPool.length,
@@ -238,16 +308,44 @@ app.post("/admin/bots/:key/stop", adminAuth, (req, res) => {
   res.json({ success: true, message: `${bots[key].name} stopped` });
 });
 
-app.post("/admin/bots/:key/config", adminAuth, (req, res) => {
+app.post("/admin/bots/:key/config", adminAuth, async (req, res) => {
   const { key } = req.params;
   if (!bots[key]) return res.status(404).json({ error: "Bot not found" });
-  const { sourceId, destId, interval, token } = req.body;
+  const { sourceId, destId, destKey, interval, token } = req.body;
+
+  // destKey is the named form ("mai_maitrending"); destId stays supported so an
+  // older admin build keeps working.
+  if (destKey) {
+    const dest = DESTINATIONS.find((d) => d.key === destKey);
+    if (!dest) return res.status(400).json({ error: "Unknown destination: " + destKey });
+    bots[key].destId = dest.chatId;
+  } else if (destId) {
+    bots[key].destId = destId;
+  }
+
   if (sourceId) bots[key].sourceId = sourceId;
-  if (destId) bots[key].destId = destId;
-  if (interval) bots[key].interval = parseInt(interval);
+
+  if (interval !== undefined && interval !== null && interval !== "") {
+    const n = parseInt(interval, 10);
+    // A zero or negative interval would make setInterval fire continuously and
+    // flood the destination channel; 1 minute is the floor.
+    if (!Number.isFinite(n) || n < 1) return res.status(400).json({ error: "Interval must be a whole number of minutes, 1 or more" });
+    bots[key].interval = n;
+  }
+
+  // The token is NOT persisted — it is a bot credential and belongs in env.
   if (token) bots[key].token = token;
+
+  await saveBotConfig(key);
+  // Restart the timer so a new interval takes effect now rather than after the
+  // current one elapses.
   if (bots[key].active) startTimer(key);
-  res.json({ success: true });
+  res.json({ success: true, config: { interval: bots[key].interval, destId: bots[key].destId, sourceId: bots[key].sourceId } });
+});
+
+// Named destinations for the dashboard picker.
+app.get("/admin/destinations", adminAuth, (req, res) => {
+  res.json({ destinations: DESTINATIONS.map(({ key, site, community, label, chatId }) => ({ key, site, community, label, chatId })) });
 });
 
 app.post("/admin/bots/:key/forward", adminAuth, async (req, res) => {
@@ -291,6 +389,9 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
   console.log(`🚀 Forwarding bots on port ${PORT}`);
   await loadBotState();
+  // Saved interval/destination must be applied BEFORE the timers start, or the
+  // first cycle after a restart runs on the env defaults instead.
+  await loadBotConfig();
   startTimer("bot1");
   startTimer("bot2");
 });
