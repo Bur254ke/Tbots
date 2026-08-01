@@ -97,8 +97,15 @@ async function saveBotState(botKey) {
 // Forwarding to a channel that is not in that map makes the main bot log
 // "Unknown channel" and silently drop every video.
 const DESTINATIONS = [
-  { key: "mai_maitwerking", site: "Mai", community: "maitwerking", label: "Mai: Mai Twerking", chatId: process.env.DEST1_ID || "-1003870438959" },
-  { key: "mai_maitrending", site: "Mai", community: "maitrending", label: "Mai: Trending", chatId: process.env.DEST2_ID || "-1003859771687" },
+  // Twerking Mai
+  { key: "mai_maitwerking", site: "Mai", community: "maitwerking", label: "Mai: Mai Twerking", chatId: "-1003870438959" },
+  { key: "mai_maitrending", site: "Mai", community: "maitrending", label: "Mai: Trending", chatId: "-1003859771687" },
+  { key: "mai_wetlooks", site: "Mai", community: "wetlooks", label: "Mai: Wet Looks", chatId: "-1003823166195" },
+  // Foxy Alexx
+  { key: "foxy_haul", site: "Foxy", community: "haul", label: "Foxy: Femboys", chatId: "-1002932798127" },
+  { key: "foxy_trans", site: "Foxy", community: "trans", label: "Foxy: Trans", chatId: "-1003906532971" },
+  { key: "foxy_haul2", site: "Foxy", community: "haul2", label: "Foxy: Trending", chatId: "-1003581577500" },
+];
   // Add when the channels exist (and are in communities.js):
   // { key: "foxy_haul",  site: "Foxy", community: "haul",  label: "Foxy: Femboys",  chatId: "-100…" },
   // { key: "foxy_trans", site: "Foxy", community: "trans", label: "Foxy: Trans",    chatId: "-100…" },
